@@ -894,7 +894,6 @@ body:has(.entry-dialog[open]) {
   display: grid; place-items: center; width: 44px; height: 44px;
   border: 1px solid #fff; border-radius: 15px; background: #fff;
   color: var(--accent-text); cursor: pointer; list-style: none;
-  box-shadow: 0 3px 14px rgba(16, 24, 40, 0.06);
 }
 .menu-trigger::-webkit-details-marker { display: none; }
 .menu-trigger:focus-visible { outline: 3px solid var(--accent-text); outline-offset: 3px; }
@@ -999,12 +998,8 @@ body:has(.entry-dialog[open]) {
   .entry-dialog form > .field:nth-child(2) { grid-column: auto; }
 }
 @media (min-width: 900px) {
-  .view-grid .entry-list { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
   .entry, .entry:first-child { min-width: 0; padding: 22px; }
   .entry-side { flex-direction: column; align-items: flex-end; gap: 10px; }
-}
-@media (min-width: 1500px) {
-  .view-grid .entry-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 @media (max-height: 600px) {
   .app-header { padding-top: calc(20px + env(safe-area-inset-top, 0px)); padding-bottom: 20px; }
@@ -1012,17 +1007,69 @@ body:has(.entry-dialog[open]) {
   .app-menu > .header-actions { max-height: calc(100dvh - 100px); }
   .app-menu .theme-panel { max-height: calc(100dvh - 130px); }
 }
-/* List is the default; columns are enabled only by the view toggle. */
+/* Entries always show as a single-column list. */
 .entry-list { grid-template-columns: minmax(0, 1fr); }
 .header-tools { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-.view-toggle {
+
+/* Select and menu buttons: soft lift, lighter than the + button's shadow. */
+.menu-trigger,
+.select-toggle {
+  box-shadow: 0 4px 14px rgba(16, 24, 40, 0.16);
+}
+.select-toggle {
   display: grid; place-items: center; width: 44px; height: 44px; padding: 0;
   border: 1px solid #fff; border-radius: 15px; background: #fff;
-  color: var(--accent-text); cursor: pointer;
-  box-shadow: 0 3px 14px rgba(16, 24, 40, 0.06);
-  touch-action: manipulation;
+  color: var(--accent-text); cursor: pointer; touch-action: manipulation;
 }
-.view-toggle:focus-visible { outline: 3px solid var(--accent-text); outline-offset: 3px; }
+.select-toggle[aria-pressed='true'] {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: var(--primary-foreground, #fff);
+}
+.select-toggle:disabled { opacity: 0.45; cursor: not-allowed; }
+.select-toggle:focus-visible { outline: 3px solid var(--accent-text); outline-offset: 3px; }
+
+/* Selection bar: stays at the top of the screen while scrolling a long list. */
+.select-bar {
+  position: sticky;
+  top: calc(8px + env(safe-area-inset-top, 0px));
+  z-index: 15;
+  flex-wrap: wrap;
+  box-shadow: 0 6px 20px rgba(16, 24, 40, 0.1);
+}
+.select-bar > span { font-weight: 600; }
+.select-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.select-actions button {
+  min-height: 44px; padding: 0 14px; border: 0; border-radius: 10px;
+  color: var(--accent-text); background: var(--primary-soft);
+  font: inherit; font-weight: 600; cursor: pointer; touch-action: manipulation;
+}
+.select-actions button:disabled { opacity: 0.45; cursor: not-allowed; }
+.select-actions button:focus-visible { outline: 3px solid var(--accent-text); outline-offset: 2px; }
+/* Square icon buttons in the Select bar and the Edit bar. */
+.edit-notice .select-icon { display: grid; place-items: center; width: 44px; padding: 0; }
+.select-actions .select-delete { color: var(--danger); background: var(--danger-bg); }
+
+/* Tick circle on each log while selecting. */
+.entry-check input {
+  position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none;
+}
+.entry-check:has(input:focus-visible) { outline: 3px solid var(--accent-text); outline-offset: 2px; }
+.check-indicator {
+  position: absolute; right: 16px; top: 50%; transform: translateY(-50%);
+  width: 24px; height: 24px; border: 2px solid var(--border); border-radius: 50%; background: #fff;
+}
+.entry.entry-selected {
+  background: var(--primary-soft);
+  box-shadow: inset 0 0 0 2px rgba(var(--primary-rgb, 37, 99, 235), 0.45);
+}
+.entry-selected .check-indicator { border-color: var(--primary); background: var(--primary); }
+.entry-selected .check-indicator::after {
+  /* Centre on the circle, then lift slightly: a tick's visual weight sits low. */
+  content: ''; position: absolute; left: 50%; top: 50%; width: 6px; height: 11px;
+  border: solid var(--primary-foreground, #fff); border-width: 0 2px 2px 0;
+  transform: translate(-50%, -62%) rotate(45deg);
+}
 @media (min-width: 1100px) {
-  .view-list .entry-side { flex-direction: row; align-items: center; gap: 20px; }
+  .entry-side { flex-direction: row; align-items: center; gap: 20px; }
 }

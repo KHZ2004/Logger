@@ -1,6 +1,6 @@
 // Service worker: lets the installed app open without internet.
 // Strategy: try the network first (so you get updates), fall back to the cache when offline.
-const CACHE = 'worklog-v21'
+const CACHE = 'worklog-v28'
 
 const ASSETS = [
   './',
