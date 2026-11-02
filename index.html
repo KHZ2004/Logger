@@ -3,17 +3,948 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+    <link rel="manifest" href="manifest.json" />
     <meta name="theme-color" content="#2563eb" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="apple-mobile-web-app-title" content="Hours" />
     <meta name="description" content="Log your part-time work hours" />
     <title>Work Hours Log</title>
+    <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
+
+    <!-- React and Babel load from a CDN, so nothing needs to be installed.
+         Babel turns the JSX below into plain JavaScript inside the browser. -->
+    <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
+
+    <script type="text/babel" data-presets="react">
+      const { useState, useEffect, useRef } = React
+
+      // Entries persist in this browser under the same key across app updates.
+      const ENTRIES_KEY = 'worklog.entries'
+
+      function loadEntries() {
+        const raw = localStorage.getItem(ENTRIES_KEY)
+        if (raw === null) return []
+        const entries = JSON.parse(raw)
+        if (!Array.isArray(entries) || entries.some((entry) =>
+          !entry || typeof entry.id !== 'string' || typeof entry.date !== 'string' ||
+          typeof entry.start !== 'string' || typeof entry.end !== 'string' ||
+          typeof entry.task !== 'string' || !Number.isFinite(entry.hours)
+        )) {
+          throw new Error('Saved entries could not be read.')
+        }
+        return entries
+      }
+
+      function saveEntries(entries) {
+        // Let failures reach the UI; never report success when this write fails.
+        localStorage.setItem(ENTRIES_KEY, JSON.stringify(entries))
+      }
+
+      // ===================== utils =====================
+      const pad = (n) => String(n).padStart(2, '0')
+
+      // Today's date as YYYY-MM-DD in the phone's local time zone.
+      // (toISOString() would use UTC and can give yesterday's date in Australia.)
+      function todayISO() {
+        const d = new Date()
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+      }
+
+      // { h: '09', m: '30' } -> 570
+      const toMinutes = ({ h, m }) => Number(h) * 60 + Number(m)
+
+      // '2026-11-03' -> 'Tue, 3 Nov 2026'
+      function formatDate(iso) {
+        const [y, m, d] = iso.split('-').map(Number)
+        return new Date(y, m - 1, d).toLocaleDateString(undefined, {
+          weekday: 'short',
+          day: 'numeric',
+          month: 'short',
+          year: 'numeric',
+        })
+      }
+
+      const formatHours = (hours) => `${hours.toFixed(2)} h`
+
+      // crypto.randomUUID only exists on HTTPS/localhost, so fall back elsewhere.
+      function makeId() {
+        if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID()
+        return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+      }
+
+      // ===================== TimePicker =====================
+      const HOURS = Array.from({ length: 24 }, (_, i) => pad(i))
+      const MINUTES = Array.from({ length: 60 }, (_, i) => pad(i))
+
+      // Two native <select>s: on phones these open as scroll wheels / scroll lists.
+      // value is { h: 'HH', m: 'MM' }
+      function TimePicker({ label, value, onChange, invalid }) {
+        return (
+          <fieldset className="field">
+            <legend className="label">{label}</legend>
+            <div className="time-row">
+              <select
+                aria-label={`${label} hour`}
+                className={invalid ? 'invalid' : ''}
+                value={value.h}
+                onChange={(e) => onChange({ ...value, h: e.target.value })}
+              >
+                {HOURS.map((h) => (
+                  <option key={h} value={h}>{h}</option>
+                ))}
+              </select>
+              <span className="colon" aria-hidden="true">:</span>
+              <select
+                aria-label={`${label} minute`}
+                className={invalid ? 'invalid' : ''}
+                value={value.m}
+                onChange={(e) => onChange({ ...value, m: e.target.value })}
+              >
+                {MINUTES.map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+            </div>
+          </fieldset>
+        )
+      }
+
+      // ===================== TaskSelect =====================
+      const ADD_TASK = '__add_task__'
+
+      // tasks = tasks used in saved entries. A newly typed task isn't in there yet,
+      // so it's shown as an extra option while it's selected.
+      function TaskSelect({ tasks, value, onChange }) {
+        const [newName, setNewName] = useState('')
+        const [error, setError] = useState('')
+
+        const options = value !== ADD_TASK && !tasks.includes(value) ? [...tasks, value] : tasks
+
+        function handleSaveTask() {
+          const name = newName.trim()
+          if (!name) {
+            setError('Task name cannot be empty.')
+            return
+          }
+          if (tasks.some((t) => t.toLowerCase() === name.toLowerCase())) {
+            setError('That task already exists.')
+            return
+          }
+          onChange(name) // select the new task; it joins the list once an entry is saved with it
+          setNewName('')
+          setError('')
+        }
+
+        return (
+          <div className="field">
+            <label htmlFor="task" className="label">Task</label>
+            <select
+              id="task"
+              value={value}
+              onChange={(e) => {
+                onChange(e.target.value)
+                setError('')
+              }}
+            >
+              <option value={ADD_TASK}>Add Task</option>
+              {options.map((t) => (
+                <option key={t} value={t}>{t}</option>
+              ))}
+            </select>
+
+            {value === ADD_TASK && (
+              <div className="add-task">
+                <input
+                  type="text"
+                  placeholder="New task name"
+                  aria-label="New task name"
+                  maxLength={50}
+                  enterKeyHint="done"
+                  className={error ? 'invalid' : ''}
+                  value={newName}
+                  onChange={(e) => {
+                    setNewName(e.target.value)
+                    setError('')
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault() // don't submit the whole entry form
+                      handleSaveTask()
+                    }
+                  }}
+                />
+                <button type="button" className="btn btn-secondary" onClick={handleSaveTask}>
+                  Save
+                </button>
+              </div>
+            )}
+
+            {error && <p className="error" role="alert">{error}</p>}
+          </div>
+        )
+      }
+
+      // ===================== CompanyInput =====================
+      // Text box with a dropdown of saved companies: type a new name, or tap ▾ to pick one.
+      function CompanyInput({ value, onChange, companies }) {
+        const [open, setOpen] = useState(false)
+        const wrapRef = useRef(null)
+
+        const sorted = [...companies].sort((a, b) => a.localeCompare(b))
+        const query = value.trim().toLowerCase()
+        // If the box already holds a saved name, show the full list so it's easy to switch.
+        const exactMatch = sorted.some((c) => c.toLowerCase() === query)
+        const options = !query || exactMatch ? sorted : sorted.filter((c) => c.toLowerCase().includes(query))
+
+        // Close the list when tapping anywhere outside it.
+        useEffect(() => {
+          if (!open) return
+          const close = (e) => {
+            if (!wrapRef.current.contains(e.target)) setOpen(false)
+          }
+          document.addEventListener('pointerdown', close)
+          return () => document.removeEventListener('pointerdown', close)
+        }, [open])
+
+        function choose(name) {
+          onChange(name)
+          setOpen(false)
+        }
+
+        return (
+          <div className="combo" ref={wrapRef}>
+            <input
+              id="company"
+              type="text"
+              placeholder="Company Name"
+              maxLength={40}
+              autoComplete="off"
+              aria-expanded={open}
+              aria-controls="company-list"
+              value={value}
+              onChange={(e) => {
+                onChange(e.target.value)
+                setOpen(true)
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') setOpen(false)
+                if (e.key === 'Enter' && open) {
+                  e.preventDefault() // close the list instead of submitting the form
+                  setOpen(false)
+                }
+              }}
+            />
+
+            {companies.length > 0 && (
+              <button
+                type="button"
+                className="combo-toggle"
+                aria-label="Show saved companies"
+                aria-expanded={open}
+                onClick={() => setOpen((o) => !o)}
+              >
+                <svg width="12" height="8" viewBox="0 0 12 8" aria-hidden="true">
+                  <path d="M1 1l5 5 5-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                </svg>
+              </button>
+            )}
+
+            {open && options.length > 0 && (
+              <ul id="company-list" className="combo-list">
+                {options.map((c) => (
+                  <li key={c}>
+                    <button
+                      type="button"
+                      className={c === value ? 'selected' : ''}
+                      onClick={() => choose(c)}
+                    >
+                      {c}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )
+      }
+
+      // ===================== EntryForm =====================
+      const DEFAULT_START = { h: '09', m: '00' }
+      const DEFAULT_END = { h: '17', m: '00' }
+
+      function EntryForm({ tasks, companies, lastCompany, onSave, entry = null }) {
+  const [date, setDate] = useState(() => entry?.date ?? todayISO())
+  const [company, setCompany] = useState(entry?.company ?? lastCompany)
+  const [start, setStart] = useState(() => entry ? { h: entry.start.slice(0, 2), m: entry.start.slice(3, 5) } : DEFAULT_START)
+  const [end, setEnd] = useState(() => entry ? { h: entry.end.slice(0, 2), m: entry.end.slice(3, 5) } : DEFAULT_END)
+  const [task, setTask] = useState(entry?.task ?? ADD_TASK)
+  const [formError, setFormError] = useState('')
+
+  const minutes = toMinutes(end) - toMinutes(start)
+  const timeError = minutes <= 0 ? 'End time must be later than start time.' : ''
+
+  function handleSubmit(e) {
+    e.preventDefault()
+    if (!date) {
+      setFormError('Please choose a date.')
+      return
+    }
+    if (!company.trim()) {
+      setFormError('Please enter the company name.')
+      return
+    }
+    if (timeError) return
+    if (task === ADD_TASK) {
+      setFormError('Please choose a task, or add a new one.')
+      return
+    }
+
+    // Reuse the saved spelling if it matches an existing company (e.g. "coles" -> "Coles").
+    const companyName =
+      companies.find((c) => c.toLowerCase() === company.trim().toLowerCase()) ?? company.trim()
+
+    // onSave closes the dialog and shows "Entry saved"; it throws if storage fails.
+    try {
+      onSave({
+        id: entry?.id ?? makeId(),
+        date,
+        company: companyName,
+        start: `${start.h}:${start.m}`,
+        end: `${end.h}:${end.m}`,
+        task,
+        minutes,
+        hours: Math.round((minutes / 60) * 100) / 100,
+        createdAt: entry?.createdAt ?? Date.now(),
+      })
+    } catch {
+      setFormError('Entry was not saved. Browser storage may be blocked or full. Your form has been kept; allow storage or free space, then try again.')
+      return
+    }
+
+    // Clear the form back to its defaults (company is kept, since it rarely changes).
+    setDate(todayISO())
+    setCompany(companyName)
+    setStart(DEFAULT_START)
+    setEnd(DEFAULT_END)
+    setTask(ADD_TASK)
+    setFormError('')
+  }
+
+  return (
+    <section className="card">
+      <h2>{entry ? 'Edit entry' : 'New entry'}</h2>
+      <form onSubmit={handleSubmit} noValidate>
+        <div className="field">
+          <label htmlFor="date" className="label">Date</label>
+          <input
+            id="date"
+            type="date"
+            value={date}
+            onChange={(e) => {
+              setDate(e.target.value)
+              setFormError('')
+            }}
+          />
+        </div>
+
+        <div className="field">
+          <label htmlFor="company" className="label">Company</label>
+          <CompanyInput
+            value={company}
+            companies={companies}
+            onChange={(c) => {
+              setCompany(c)
+              setFormError('')
+            }}
+          />
+        </div>
+
+        <div className="time-grid">
+          <TimePicker label="Start time" value={start} onChange={setStart} invalid={!!timeError} />
+          <TimePicker label="End time" value={end} onChange={setEnd} invalid={!!timeError} />
+        </div>
+
+        {timeError ? (
+          <p className="error" role="alert">{timeError}</p>
+        ) : (
+          <p className="hint">Total: <strong>{formatHours(minutes / 60)}</strong></p>
+        )}
+
+        <TaskSelect
+          tasks={tasks}
+          value={task}
+          onChange={(t) => {
+            setTask(t)
+            setFormError('')
+          }}
+        />
+
+        {formError && <p className="error" role="alert">{formError}</p>}
+
+        <button type="submit" className="btn btn-primary" disabled={!!timeError}>
+          {entry ? 'Save changes' : 'Save entry'}
+        </button>
+      </form>
+    </section>
+  )
+}
+
+
+      // ===================== EntryList =====================
+      // Newest date first; same day -> later start time first.
+      function byNewest(a, b) {
+        return (
+          b.date.localeCompare(a.date) ||
+          b.start.localeCompare(a.start) ||
+          b.createdAt - a.createdAt
+        )
+      }
+
+      // selectMode: null (normal), 'edit' (tap one log to edit) or 'multi' (tick logs to print/delete).
+      function EntryList({ entries, selectMode = null, selectedIds, onSelect, onToggle }) {
+  const sorted = [...entries].sort(byNewest)
+  const describe = (entry) => `${entry.company || entry.task}, ${formatDate(entry.date)}, ${entry.start} to ${entry.end}`
+
+  return (
+    <section className="card" aria-label="Saved entries">
+      {sorted.length === 0 ? (
+        <div className="empty-state">
+          <div className="empty-art" aria-hidden="true">
+            <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="5" y="4" width="14" height="17" rx="3" />
+              <path d="M9 3h6v4H9zM9 12h6M9 16h4" />
+            </svg>
+          </div>
+          <p className="empty">No entries yet. Your saved hours will appear here.</p>
+        </div>
+      ) : (
+        <ul className="entry-list">
+          {sorted.map((entry) => {
+            const isSelected = selectMode === 'multi' && selectedIds.has(entry.id)
+            return (
+              <li key={entry.id} className={`entry ${selectMode ? 'entry-selectable' : ''} ${isSelected ? 'entry-selected' : ''}`}>
+                {selectMode === 'edit' && (
+                  <button type="button" className="entry-select" onClick={() => onSelect(entry)}
+                    aria-label={`Edit ${describe(entry)}`}>
+                    <span className="selection-indicator" aria-hidden="true">&#8594;</span>
+                  </button>
+                )}
+                {selectMode === 'multi' && (
+                  <label className="entry-select entry-check">
+                    <input type="checkbox" checked={isSelected} onChange={() => onToggle(entry.id)}
+                      aria-label={`Select ${describe(entry)}`} />
+                    <span className="check-indicator" aria-hidden="true" />
+                  </label>
+                )}
+                <div className="entry-main">
+                  <div className="entry-date">{formatDate(entry.date)}</div>
+                  {entry.company && <div className="entry-company">{entry.company}</div>}
+                  <div className="entry-task">{entry.task}</div>
+                  <div className="entry-time">{entry.start} – {entry.end}</div>
+                </div>
+                <div className="entry-side">
+                  <div className="entry-hours">{formatHours(entry.hours)}</div>
+                </div>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+
+      // ===================== PDF download =====================
+      // The PDF libraries load only when the download button is first tapped, so the app starts fast.
+      const PDF_LIBS = [
+        'https://unpkg.com/jspdf@2.5.2/dist/jspdf.umd.min.js',
+        'https://unpkg.com/jspdf-autotable@3.8.4/dist/jspdf.plugin.autotable.min.js',
+      ]
+      let pdfLibs = null
+
+      function loadScript(src) {
+        return new Promise((resolve, reject) => {
+          const script = document.createElement('script')
+          script.src = src
+          script.onload = resolve
+          script.onerror = () => {
+            script.remove()
+            reject(new Error(`Could not load ${src}`))
+          }
+          document.head.appendChild(script)
+        })
+      }
+
+      function loadPdfLibs() {
+        // Load in order (the table plugin needs jsPDF first), and allow a retry after a failure.
+        pdfLibs ??= PDF_LIBS.reduce((chain, src) => chain.then(() => loadScript(src)), Promise.resolve())
+          .then(() => window.jspdf.jsPDF)
+          .catch((error) => {
+            pdfLibs = null
+            throw error
+          })
+        return pdfLibs
+      }
+
+      async function downloadPdf(entries, theme) {
+        const jsPDF = await loadPdfLibs()
+        const doc = new jsPDF({ unit: 'pt', format: 'a4' })
+        const sorted = [...entries].sort(byNewest)
+        const totalHours = sorted.reduce((sum, e) => sum + e.hours, 0)
+        const headColor = [1, 3, 5].map((i) => parseInt(theme.slice(i, i + 2), 16))
+        const headText = themeVariables(theme)['--primary-foreground'] === '#ffffff' ? 255 : 17
+
+        doc.setFontSize(18)
+        doc.text('Work Hours Log', 40, 50)
+        doc.setFontSize(10)
+        doc.setTextColor(102, 112, 133)
+        doc.text(
+          `Downloaded ${formatDate(todayISO())}   |   ${sorted.length} ${sorted.length === 1 ? 'entry' : 'entries'}   |   ${formatHours(totalHours)} total`,
+          40,
+          68
+        )
+
+        doc.autoTable({
+          startY: 84,
+          margin: { left: 40, right: 40, bottom: 50 },
+          head: [[
+            'Date', 'Company', 'Task',
+            { content: 'Start', styles: { halign: 'center' } },
+            { content: 'End', styles: { halign: 'center' } },
+            { content: 'Hours', styles: { halign: 'right' } },
+          ]],
+          body: sorted.map((e) => [formatDate(e.date), e.company || '', e.task, e.start, e.end, e.hours.toFixed(2)]),
+          foot: [[{ content: 'Total', colSpan: 5 }, { content: totalHours.toFixed(2), styles: { halign: 'right' } }]],
+          showFoot: 'lastPage',
+          styles: { fontSize: 10, cellPadding: 6, textColor: [26, 34, 51] },
+          headStyles: { fillColor: headColor, textColor: headText },
+          footStyles: { fillColor: [244, 246, 251], textColor: [26, 34, 51] },
+          alternateRowStyles: { fillColor: [250, 251, 253] },
+          columnStyles: { 3: { halign: 'center' }, 4: { halign: 'center' }, 5: { halign: 'right' } },
+          didDrawPage: ({ pageNumber }) => {
+            doc.setFontSize(9)
+            doc.setTextColor(102, 112, 133)
+            doc.text(`Page ${pageNumber}`, doc.internal.pageSize.getWidth() - 40, doc.internal.pageSize.getHeight() - 24, { align: 'right' })
+          },
+        })
+
+        doc.save(`work-hours-log-${todayISO()}.pdf`)
+      }
+
+      // ===================== App =====================
+      // Unique, alphabetical values of one field across all saved entries.
+      const uniqueValues = (entries, key) =>
+        [...new Set(entries.map((e) => e[key]).filter(Boolean))].sort((a, b) => a.localeCompare(b))
+
+      const DEFAULT_THEME = '#2563eb'
+      const THEME_KEY = 'worklog.theme'
+      const validTheme = (color) => /^#[0-9a-f]{6}$/i.test(color)
+
+      function loadTheme() {
+        try {
+          const color = localStorage.getItem(THEME_KEY)
+          return validTheme(color) ? color : DEFAULT_THEME
+        } catch {
+          return DEFAULT_THEME
+        }
+      }
+
+      function themeVariables(color) {
+        const rgb = [1, 3, 5].map((start) => parseInt(color.slice(start, start + 2), 16))
+        const luminance = (values) => values.map((v) => {
+          const s = v / 255
+          return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4
+        }).reduce((sum, v, i) => sum + v * [0.2126, 0.7152, 0.0722][i], 0)
+        const foreground = luminance(rgb) > 0.179 ? '#111111' : '#ffffff'
+        let text = [...rgb]
+        while ((1.05 / (luminance(text) + 0.05)) < 4.5) text = text.map((v) => Math.floor(v * 0.9))
+        return {
+          '--primary': color,
+          '--primary-dark': `rgb(${rgb.map((v) => Math.round(v * 0.85)).join(', ')})`,
+          '--primary-rgb': rgb.join(', '),
+          '--primary-foreground': foreground,
+          '--accent-text': `rgb(${text.join(', ')})`,
+          '--primary-soft': `rgba(${rgb.join(', ')}, 0.1)`,
+        }
+      }
+
+      function saveTheme(color) {
+        localStorage.setItem(THEME_KEY, color)
+      }
+
+      function applyEntryChange(entries, entry, editingId = null) {
+  if (editingId === null) return [...entries, entry]
+  if (!entries.some((item) => item.id === editingId)) throw new Error('Entry no longer exists.')
+  return entries.map((item) => item.id === editingId
+    ? { ...entry, id: item.id, createdAt: item.createdAt }
+    : item)
+}
+
+function App() {
+  const [theme, setTheme] = useState(loadTheme)
+  const [themeError, setThemeError] = useState('')
+  const [hex, setHex] = useState(theme.replace(/^#/, ''))
+  const [hexError, setHexError] = useState('')
+  const chooseTheme = (color) => {
+    setTheme(color)
+    setHex(color.replace(/^#/, ''))
+    setHexError('')
+    try {
+      saveTheme(color)
+      setThemeError('')
+    } catch {
+      setThemeError('Color applied for now, but could not be saved. Browser storage may be blocked or full.')
+    }
+  }
+
+  useEffect(() => {
+    const meta = document.querySelector('meta[name="theme-color"]')
+    if (meta) meta.content = theme
+  }, [theme])
+
+  const [initialStorage] = useState(() => {
+    try {
+      return { entries: loadEntries(), error: '' }
+    } catch {
+      return { entries: [], error: 'Unable to read saved entries. They have not been overwritten. Allow browser storage and reopen the app. If the problem continues, keep the browser data so it can be recovered.' }
+    }
+  })
+  const [entries, setEntries] = useState(initialStorage.entries)
+  const [storageError, setStorageError] = useState(initialStorage.error)
+  const entryDialog = useRef(null)
+  const menu = useRef(null)
+  const [selecting, setSelecting] = useState(false)
+  // Multi-select mode: tick several logs, then print or delete them together.
+  const [multiSelecting, setMultiSelecting] = useState(false)
+  const [selectedIds, setSelectedIds] = useState(() => new Set())
+  const [editing, setEditing] = useState(null)
+  const [formSession, setFormSession] = useState(0)
+
+  useEffect(() => {
+    if (selecting) document.querySelector('.entry-select')?.focus()
+  }, [selecting])
+
+  const exitMultiSelect = () => {
+    setMultiSelecting(false)
+    setSelectedIds(new Set())
+  }
+  const startEditSelect = () => {
+    exitMultiSelect()
+    setSelecting(true)
+  }
+  const toggleMultiSelect = () => {
+    if (multiSelecting) return exitMultiSelect()
+    if (menu.current) menu.current.open = false
+    setSelecting(false)
+    setMultiSelecting(true)
+  }
+  const toggleSelected = (id) => setSelectedIds((prev) => {
+    const next = new Set(prev)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    return next
+  })
+
+  const openEntry = (entry = null) => {
+    setEditing(entry)
+    setSelecting(false)
+    exitMultiSelect()
+    setFormSession((value) => value + 1)
+    entryDialog.current.showModal()
+  }
+
+  useEffect(() => {
+    const closeOutside = (event) => {
+      if (menu.current && !menu.current.contains(event.target)) menu.current.open = false
+    }
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape') {
+        if (menu.current) menu.current.open = false
+        setSelecting(false)
+        setMultiSelecting(false)
+        setSelectedIds(new Set())
+      }
+    }
+    document.addEventListener('pointerdown', closeOutside)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeOutside)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [])
+  const [saved, setSaved] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState('')
+
+  useEffect(() => {
+    if (!saved) return
+    const timer = setTimeout(() => setSaved(false), 2500)
+    return () => clearTimeout(timer)
+  }, [saved])
+
+  async function exportPdf(list) {
+    setExporting(true)
+    setExportError('')
+    try {
+      await downloadPdf(list, theme)
+    } catch {
+      setExportError('Could not create the PDF. Check your internet connection and try again.')
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  function handleDownload() {
+    menu.current.open = false
+    exportPdf(entries)
+  }
+
+  // Only entries that still exist count as selected.
+  const selectedEntries = entries.filter((e) => selectedIds.has(e.id))
+  const allSelected = entries.length > 0 && selectedEntries.length === entries.length
+
+  function deleteSelected() {
+    const count = selectedEntries.length
+    if (count === 0) return
+    if (!window.confirm(`Delete ${count} selected ${count === 1 ? 'entry' : 'entries'}?\n\nThis cannot be undone.`)) return
+    if (deleteEntries(new Set(selectedEntries.map((e) => e.id)))) exitMultiSelect()
+  }
+
+  const addEntry = (entry) => {
+    if (initialStorage.error) throw new Error(initialStorage.error)
+    const next = applyEntryChange(entries, entry, editing?.id ?? null)
+    saveEntries(next)
+    setEntries(next)
+    setStorageError('')
+    entryDialog.current.close()
+    setSaved(true)
+  }
+  // Returns true when the deletion was saved.
+  const deleteEntries = (ids) => {
+    if (initialStorage.error) return false
+    const next = entries.filter((e) => !ids.has(e.id))
+    try {
+      saveEntries(next)
+      setEntries(next)
+      setStorageError('')
+      return true
+    } catch {
+      setStorageError('Could not save the deletion. Your entries have been kept. Browser storage may be blocked or full. Please try again.')
+      return false
+    }
+  }
+
+  // Dropdown options come from the saved entries, so deleting every entry empties both lists.
+  const tasks = uniqueValues(entries, 'task')
+  const companies = uniqueValues(entries, 'company')
+
+  // Most recently used company, to prefill the form.
+  const lastCompany = entries.reduce(
+    (latest, e) => (e.company && (!latest || e.createdAt > latest.createdAt) ? e : latest),
+    null
+  )?.company ?? ''
+
+  return (
+    <div className="app" style={themeVariables(theme)}>
+      <header className="app-header">
+        <div className="header-row">
+          <h1>Work Hours Log</h1>
+          <div className="header-tools">
+          <button type="button" className="select-toggle" onClick={toggleMultiSelect}
+            disabled={entries.length === 0 || !!initialStorage.error}
+            aria-pressed={multiSelecting}
+            aria-label={multiSelecting ? 'Stop selecting logs' : 'Select logs to print or delete'}
+            title={multiSelecting ? 'Stop selecting' : 'Select logs'}>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <rect x="3.5" y="3.5" width="17" height="17" rx="4" />
+              <path d="m8 12 3 3 5-6" />
+            </svg>
+          </button>
+          <details className="app-menu" ref={menu}>
+            <summary className="menu-trigger" aria-label="Open actions menu" title="Menu">
+              <svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+                <path d="M4 6h16M4 12h16M4 18h16" />
+              </svg>
+            </summary>
+            <div className="header-actions" aria-label="App actions">
+            <button type="button" className="edit-button" aria-label="Edit a log" title="Edit a log"
+              disabled={entries.length === 0 || !!initialStorage.error}
+              onClick={() => { startEditSelect(); menu.current.open = false }}>
+              <svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M12 4H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-7" />
+                <path d="m15 3 6 6M10 17l-4 1 1-4L18 3a2.1 2.1 0 0 1 3 3Z" />
+              </svg>
+              
+            </button>
+            <button
+              type="button"
+              className="download-button"
+              onClick={handleDownload}
+              disabled={entries.length === 0 || exporting}
+              aria-busy={exporting}
+              aria-label="Download entries as PDF"
+              title={entries.length === 0 ? 'No entries to download yet' : 'Download entries as PDF'}
+            >
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M12 4v11" />
+                <path d="m7 10 5 5 5-5" />
+                <path d="M5 20h14" />
+              </svg>
+              
+            </button>
+            <details className="theme-picker">
+              <summary className="theme-trigger" aria-label="Choose theme color" title="Choose theme color">
+                <svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  {/* Paintbrush: tapered handle, ferrule band, teardrop bristles */}
+                  <path d="M7.6 13.4C11.5 9.6 16.6 4.8 20.2 3.3c.8-.3 1.1 0 .8.6-1.6 3.7-6.5 8.5-10.4 12.5" />
+                  <path d="M9.3 11.7l3 3" />
+                  <path d="M7.6 13.4c-2.3-.3-4 1.4-3.9 3.6 0 1.6-.4 2.9-1.1 4.4 1.5-.7 2.8-1.1 4.4-1.1 2.2.1 3.9-1.7 3.6-3.9" />
+                </svg>
+                
+              </summary>
+              <div className="theme-panel">
+                <h2>Theme color</h2>
+                <p>Make it yours.</p>
+                <label className="custom-theme">
+                  <span>Custom Color</span>
+                  <input type="color" value={theme} onChange={(event) => chooseTheme(event.target.value)} />
+                </label>
+                <label className="hex-theme" htmlFor="theme-hex">HEX code</label>
+                <div className="hex-control">
+                  <span className="hex-prefix" aria-hidden="true">#</span>
+                  <input id="theme-hex" className="hex-input" type="text" value={hex}
+                    placeholder="2563EB" spellCheck={false} autoComplete="off"
+                    autoCapitalize="characters" aria-invalid={!!hexError}
+                    aria-describedby={hexError ? 'theme-hex-error' : undefined}
+                    onChange={(event) => {
+                      const value = event.target.value.trim().replace(/^#/, '')
+                      setHex(value)
+                      setHexError('')
+                      if (/^[0-9a-f]{6}$/i.test(value)) chooseTheme(`#${value}`)
+                    }}
+                    onBlur={() => {
+                      if (/^[0-9a-f]{6}$/i.test(hex)) chooseTheme(`#${hex}`)
+                      else setHexError('Enter six HEX digits, for example 2563EB.')
+                    }} />
+                </div>
+                {hexError && <p id="theme-hex-error" className="error" role="alert">{hexError}</p>}
+                <button type="button" className="theme-reset" onClick={() => chooseTheme(DEFAULT_THEME)}>Reset Default</button>
+                {themeError && <p className="error" role="alert">{themeError}</p>}
+              </div>
+            </details>
+            </div>
+          </details>
+          </div>
+        </div>
+        <p>Keep track of your work, one shift at a time.</p>
+      </header>
+
+      <main>
+        {storageError && <p className="error" role="alert">{storageError}</p>}
+        {exportError && <p className="error" role="alert">{exportError}</p>}
+        {selecting && (
+          <div className="edit-notice" role="status">
+            <span>Select one log to edit.</span>
+            <button type="button" className="select-icon" onClick={() => setSelecting(false)}
+              aria-label="Cancel editing" title="Cancel">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+                <path d="M6 6l12 12M18 6 6 18" />
+              </svg>
+            </button>
+          </div>
+        )}
+        {multiSelecting && (
+          <div className="edit-notice select-bar" role="region" aria-label="Selected logs">
+            <span aria-live="polite">
+              {selectedEntries.length === 0 ? 'Tap logs to select them.' : `${selectedEntries.length} selected`}
+            </span>
+            <div className="select-actions">
+              <button type="button"
+                onClick={() => setSelectedIds(allSelected ? new Set() : new Set(entries.map((e) => e.id)))}>
+                {allSelected ? 'Clear all' : 'Select all'}
+              </button>
+              <button type="button" className="select-icon" onClick={() => exportPdf(selectedEntries)}
+                disabled={selectedEntries.length === 0 || exporting} aria-busy={exporting}
+                aria-label="Download selected logs as PDF" title="Download selected as PDF">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M12 4v11" />
+                  <path d="m7 10 5 5 5-5" />
+                  <path d="M5 20h14" />
+                </svg>
+              </button>
+              <button type="button" className="select-icon select-delete" onClick={deleteSelected}
+                disabled={selectedEntries.length === 0}
+                aria-label="Delete selected logs" title="Delete selected">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M4 7h16" />
+                  <path d="M10 3h4a1 1 0 0 1 1 1v3H9V4a1 1 0 0 1 1-1Z" />
+                  <path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12" />
+                  <path d="M10 11v6M14 11v6" />
+                </svg>
+              </button>
+              <button type="button" className="select-icon" onClick={exitMultiSelect}
+                aria-label="Cancel selecting" title="Cancel">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+                  <path d="M6 6l12 12M18 6 6 18" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        )}
+        <EntryList
+          entries={entries}
+          selectMode={selecting ? 'edit' : multiSelecting ? 'multi' : null}
+          selectedIds={selectedIds}
+          onSelect={openEntry}
+          onToggle={toggleSelected}
+        />
+      </main>
+      <button
+        type="button"
+        className="add-entry-button"
+        aria-label="Add new entry"
+        aria-haspopup="dialog"
+        onClick={() => openEntry()}
+      >
+        <span aria-hidden="true">+</span>
+      </button>
+      <dialog ref={entryDialog} className="entry-dialog" aria-label={editing ? 'Edit entry' : 'New entry'}>
+        <button
+          type="button"
+          className="dialog-close"
+          aria-label={editing ? 'Close edit entry' : 'Close new entry'}
+          onClick={() => entryDialog.current.close()}
+        >
+          <span aria-hidden="true">×</span>
+        </button>
+        <EntryForm key={formSession} entry={editing} tasks={tasks} companies={companies} lastCompany={lastCompany} onSave={addEntry} />
+      </dialog>
+      <div className={`toast ${saved ? 'show' : ''}`} role="status" aria-live="polite">
+        {saved ? 'Entry saved' : ''}
+      </div>
+    </div>
+  )
+}
+
+
+      ReactDOM.createRoot(document.getElementById('root')).render(<App />)
+    </script>
+
+    <script>
+      // Offline support + installability. Service workers only run on https:// or localhost,
+      // so this is skipped when you open the file by double-clicking it.
+      if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+        navigator.serviceWorker.register('sw.js')
+      }
+    </script>
   </body>
 </html>
